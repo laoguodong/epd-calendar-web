@@ -174,11 +174,11 @@ class NordicSecureDFU {
   }
 
   async createObject(type, size) {
-    const buffer = new ArrayBuffer(5);
+    const buffer = new ArrayBuffer(6);
     const view = new DataView(buffer);
     view.setUint8(0, OP_CREATE);
     view.setUint8(1, type);
-    view.setUint32(1, size, true);
+    view.setUint32(2, size, true);
     return await this.sendControl(new Uint8Array(buffer));
   }
 
