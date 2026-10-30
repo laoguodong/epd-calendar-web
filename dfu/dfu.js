@@ -1,5 +1,5 @@
 // Modern Nordic Secure DFU implementation for Web Bluetooth
-// Supports single-bank dual-bank Secure DFU on nRF52/nRF51
+// Supports single-bank & dual-bank Secure DFU on nRF52/nRF51
 
 const DFU_SERVICE_UUID = "0000fe59-0000-1000-8000-00805f9b34fb";
 const DFU_CONTROL_UUID = "8ec90001-f315-4f60-9fb8-838830daea50";
@@ -43,8 +43,18 @@ const EXTENDED_ERRORS = {
   0x0a: "Hash calculation failed",
   0x0b: "Signature type unknown",
   0x0c: "Hash verification failed",
-  0x0d: "Insufficient flash space for firmware (芯片 Flash 剩余空间不足以容纳该固件)"
+  0x0d: "Insufficient flash space for firmware"
 };
+
+// Precomputed CRC32 table
+const CRC32_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i;
+  for (let k = 0; k < 8; k++) {
+    c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+  }
+  CRC32_TABLE[i] = c >>> 0;
+}
 
 class NordicSecureDFU {
   constructor(logCallback, progressCallback) {
@@ -80,7 +90,6 @@ class NordicSecureDFU {
     this.log(`连接设备: ${this.device.name || this.device.id}...`);
     this.server = await this.device.gatt.connect();
 
-    // Check if in Buttonless (application) mode
     let dfuService;
     try {
       dfuService = await this.server.getPrimaryService(DFU_SERVICE_UUID);
@@ -118,7 +127,7 @@ class NordicSecureDFU {
     await this.controlChar.startNotifications();
     this.controlChar.addEventListener("characteristicvaluechanged", e => this.handleNotification(e));
 
-    // Disable PRN (Packet Receipt Notification)
+    // Disable PRN
     await this.sendControl(new Uint8Array([OP_SET_PRN, 0, 0]));
     return { isBootloader: true };
   }
@@ -196,23 +205,27 @@ class NordicSecureDFU {
     return await this.sendControl(new Uint8Array([OP_EXECUTE]));
   }
 
+  calculateCrc(bytes, initialCrc = 0xFFFFFFFF) {
+    let crc = initialCrc;
+    for (let i = 0; i < bytes.length; i++) {
+      crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ bytes[i]) & 0xFF];
+    }
+    return crc >>> 0;
+  }
+
+  calculateFwCrc(bytes) {
+    return (this.calculateCrc(bytes) ^ 0xFFFFFFFF) >>> 0;
+  }
+
   async sendData(bytes, onChunk) {
-    const chunkSize = 20; // safe BLE write size
+    const chunkSize = 20;
     for (let i = 0; i < bytes.length; i += chunkSize) {
       const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
       await this.packetChar.writeValueWithoutResponse(chunk);
       if (onChunk) onChunk(i + chunk.length);
-      // Pacing to prevent BLE receive buffer overflow on nRF52
-      await new Promise(r => setTimeout(r, 15));
+      // 25ms 节奏流控，彻底防止 nRF52 蓝牙 FIFO 溢出
+      await new Promise(r => setTimeout(r, 25));
     }
-  }
-
-  calculateCrc(bytes) {
-    let crc = 0xFFFFFFFF;
-    for (let i = 0; i < bytes.length; i++) {
-      crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ bytes[i]) & 0xFF];
-    }
-    return (crc ^ 0xFFFFFFFF) >>> 0;
   }
 
   async transferInit(initBytes) {
@@ -220,7 +233,7 @@ class NordicSecureDFU {
     const select = await this.selectObject(OBJECT_COMMAND);
     this.log(`Init command 槽位信息: maxSize=${select.maxSize}, offset=${select.offset}, crc=0x${select.crc.toString(16)}`);
 
-    const expectedCrc = this.calculateCrc(initBytes);
+    const expectedCrc = this.calculateFwCrc(initBytes);
     if (select.offset === initBytes.length && select.crc === expectedCrc) {
       this.log("设备已存在匹配的 init packet，跳过写入直接执行...");
     } else {
@@ -240,7 +253,22 @@ class NordicSecureDFU {
     const select = await this.selectObject(OBJECT_DATA);
     const maxSize = select.maxSize;
     let offset = select.offset;
-    this.log(`Data 槽位: maxSize=${maxSize}, 当前断点 offset=${offset}`);
+    const deviceCrc = select.crc;
+
+    this.log(`Data 槽位: maxSize=${maxSize}, 设备当前上报 offset=${offset}, crc=0x${deviceCrc.toString(16)}`);
+
+    // 官方 nRF DFU 断点恢复机制：如果上次因丢包中断，需检查已写入部分是否完全正确
+    if (offset > 0) {
+      const remainder = offset % maxSize;
+      const expectedCrcAtOffset = this.calculateFwCrc(fwBytes.subarray(0, offset));
+      if (deviceCrc !== expectedCrcAtOffset || remainder !== 0) {
+        // 数据受损或未停在完整 page 边界，回退到上一个已完整执行的 Page 边界
+        offset = Math.floor(offset / maxSize) * maxSize;
+        this.log(`检测到未对齐或校验异常的残留断点，已自动回退到安全页边界: offset=${offset}`);
+      } else {
+        this.log(`断点已通过校验，可直接增量续传: offset=${offset}`);
+      }
+    }
 
     const total = fwBytes.length;
     while (offset < total) {
@@ -260,7 +288,7 @@ class NordicSecureDFU {
 
       const chk = await this.getChecksum();
       const expectedOffset = offset + blockSize;
-      const expectedCrc = this.calculateCrc(fwBytes.subarray(0, expectedOffset));
+      const expectedCrc = this.calculateFwCrc(fwBytes.subarray(0, expectedOffset));
       if (chk.offset !== expectedOffset || chk.crc !== expectedCrc) {
         throw new Error(`数据块校验失败: offset=${chk.offset}/${expectedOffset}, crc=0x${chk.crc.toString(16)}/0x${expectedCrc.toString(16)}`);
       }
@@ -270,14 +298,4 @@ class NordicSecureDFU {
       this.log(`块写入成功: ${offset}/${total} (${Math.round(offset*100/total)}%)`);
     }
   }
-}
-
-// Precomputed CRC32 table
-const CRC32_TABLE = new Uint32Array(256);
-for (let i = 0; i < 256; i++) {
-  let c = i;
-  for (let k = 0; k < 8; k++) {
-    c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-  }
-  CRC32_TABLE[i] = c >>> 0;
 }
