@@ -8,16 +8,16 @@
   <link rel="stylesheet" href="css/main.css?v=20251109">
   <style>
     .dfu-card {
-      margin: 15px auto;
-      padding: 20px;
-      border: 2px dashed #999;
+      margin: 20px auto;
+      padding: 30px 20px;
+      border: 2px dashed #007bff;
       border-radius: 8px;
       text-align: center;
-      background: #fafafa;
+      background: #f8fbff;
+      cursor: pointer;
     }
-    .dfu-card.hover {
-      border-color: #007bff;
-      background: #f0f7ff;
+    .dfu-card:hover {
+      background: #eef6ff;
     }
     .file-input {
       display: none;
@@ -27,15 +27,15 @@
       display: block;
       font-size: 16px;
       color: #333;
-      padding: 10px;
     }
     .file-label strong {
       color: #007bff;
+      font-size: 17px;
     }
     .progress-box {
       margin: 15px auto;
       border: 1px solid #ccc;
-      width: 90%;
+      width: 100%;
       height: 24px;
       border-radius: 12px;
       overflow: hidden;
@@ -65,6 +65,13 @@
       display: flex;
       gap: 15px;
     }
+    .preset-box {
+      margin: 10px 0 15px 0;
+      padding: 10px;
+      background: #f1f3f5;
+      border-radius: 6px;
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -76,26 +83,34 @@
 
     <h3>固件升级 (Web BLE Secure DFU)</h3>
     <p style="font-size: 13px; color: #666;">
-      支持 nRF52 蓝牙 OTA 升级。如果设备已在 Bootloader 模式（广播名 <code>DfuTarg</code>），或者支持无感 DFU 重启，可直接连接并烧录 OTA 升级包（.zip）。
+      支持 nRF52 蓝牙空中 OTA 升级。请在下方选择你的 OTA 固件升级包（<code>.zip</code> 格式）。
     </p>
 
     <fieldset>
-      <legend>固件文件</legend>
-      
-      <div style="text-align: center; margin: 10px 0;">
-        <button id="quick-load-btn" type="button" class="secondary" style="padding: 8px 16px; font-size: 14px;">⚡ 直接载入云端精简版固件 (29.4KB)</button>
-      </div>
+      <legend>选择固件</legend>
 
-      <div id="drop" class="dfu-card">
+      <div class="dfu-card" id="drop">
         <input id="file" class="file-input" type="file" accept=".zip" />
         <label id="label" class="file-label" for="file">
-          <strong>点击选择固件包 (.zip)</strong><br>
-          <span>或者将升级包拖放到此处</span>
+          <strong>📁 点击选择本地固件包 (.zip)</strong><br>
+          <span style="color: #666; font-size: 13px; margin-top: 6px; display: inline-block;">支持拖放文件，或从手机文件管理中选择</span>
         </label>
       </div>
 
+      <div class="preset-box">
+        <strong>备用固件下载：</strong>
+        <a href="https://raw.githubusercontent.com/laoguodong/epd-calendar-web/main/EPD-nRF52-charger-lite-ota.zip" download="EPD-nRF52-charger-lite-ota.zip" style="font-weight: bold;">
+          ⬇️ 下载 29.4KB 精简版固件 (EPD-nRF52-charger-lite-ota.zip)
+        </a>
+        <div style="margin-top: 6px; color: #666;">
+          如需使用上述精简固件，点击下载后，在上方点击“选择本地固件包”选中该文件即可。
+        </div>
+      </div>
+
       <div id="select-box" style="text-align: center; margin: 15px 0; display: none;">
-        <button id="update-btn" type="button" class="primary" style="padding: 10px 24px; font-size: 15px;">连接设备并开始升级</button>
+        <button id="update-btn" type="button" class="primary" style="padding: 12px 28px; font-size: 16px; font-weight: bold;">
+          连接设备并开始升级
+        </button>
       </div>
 
       <div id="status-box" class="progress-box">
@@ -112,7 +127,7 @@
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.3/jszip.min.js"></script>
-  <script src="dfu/dfu.js?v=20261030_v5"></script>
+  <script src="dfu/dfu.js?v=20261030_v6"></script>
 
   <script>
     const dropEl = document.getElementById("drop");
@@ -150,7 +165,9 @@
     }
 
     async function loadZip(file) {
+      if (!file) return;
       try {
+        setStatus(`正在读取固件包: <strong>${file.name}</strong>...`);
         const zip = await JSZip.loadAsync(file);
         const manifestStr = await zip.file("manifest.json")?.async("string");
         if (!manifestStr) throw new Error("固件包缺少 manifest.json");
@@ -167,13 +184,13 @@
           initBytes,
           fwBytes
         };
-        setStatus(`已就绪固件包: <strong>${file.name}</strong> (${fwBytes.length} 字节)`);
+        setStatus(`✅ 已选定固件: <strong>${file.name}</strong> (${fwBytes.length} 字节)<br><span style="color:#007bff; font-size:13px;">点击下方按钮开始升级</span>`);
         selectBox.style.display = "block";
       } catch (err) {
         selectBox.style.display = "none";
         statusBox.style.display = "none";
         parsedPackage = null;
-        setStatus(`<span style="color:red">解析固件包失败: ${err.message || err}</span>`);
+        setStatus(`<span style="color:red">解析固件包失败: ${err.message || err}</span><br><strong>点击重新选择</strong>`);
       }
     }
 
@@ -210,20 +227,6 @@
         updateBtn.disabled = false;
       }
     }
-
-    
-    document.getElementById("quick-load-btn").addEventListener("click", async () => {
-      try {
-        setStatus("正在下载精简版固件包...");
-        const resp = await fetch("https://raw.githubusercontent.com/laoguodong/epd-calendar-web/main/EPD-nRF52-charger-lite-ota.zip");
-        if (!resp.ok) throw new Error("获取固件失败: " + resp.status);
-        const blob = await resp.blob();
-        blob.name = "EPD-nRF52-charger-lite-ota.zip";
-        await loadZip(blob);
-      } catch (err) {
-        setStatus("<span style='color:red'>载入失败: " + err.message + "</span>");
-      }
-    });
 
     fileEl.addEventListener("change", e => loadZip(e.target.files[0]));
     updateBtn.addEventListener("click", startUpdate);
