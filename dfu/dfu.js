@@ -202,6 +202,8 @@ class NordicSecureDFU {
       const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
       await this.packetChar.writeValueWithoutResponse(chunk);
       if (onChunk) onChunk(i + chunk.length);
+      // Pacing to prevent BLE receive buffer overflow on nRF52
+      await new Promise(r => setTimeout(r, 15));
     }
   }
 
