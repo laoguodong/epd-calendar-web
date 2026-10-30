@@ -101,15 +101,13 @@
 
     <fieldset>
       <legend>升级日志</legend>
-      <pre id="log" style="height: 180px; overflow-y: auto; background: #222; color: #eee; padding: 10px; font-family: monospace; font-size: 12px; border-radius: 4px;"></pre>
+      <pre id="log" style="height: 220px; overflow-y: auto; background: #222; color: #eee; padding: 10px; font-family: monospace; font-size: 12px; border-radius: 4px;"></pre>
       <button type="button" class="secondary" onclick="document.getElementById('log').textContent = ''">清空日志</button>
     </fieldset>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/crc-32/1.0.2/crc32.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.3/jszip.min.js"></script>
-  <script src="dfu/package.js"></script>
-  <script src="dfu/secure-dfu.js"></script>
+  <script src="dfu/dfu.js"></script>
 
   <script>
     const dropEl = document.getElementById("drop");
@@ -122,7 +120,7 @@
     const progressText = document.getElementById("progress-text");
     const logEl = document.getElementById("log");
 
-    let dfuPackage = null;
+    let parsedPackage = null;
 
     function log(msg) {
       console.log(msg);
@@ -132,7 +130,7 @@
 
     function setStatus(text) {
       labelEl.innerHTML = text;
-      log(text);
+      log(text.replace(/<[^>]+>/g, ''));
     }
 
     function setProgress(state) {
@@ -146,56 +144,61 @@
       progressText.textContent = `${state.object || 'writing'}: ${state.currentBytes}/${state.totalBytes} (${percent}%)`;
     }
 
-    function setPackage(file) {
-      if (!file) return;
-      dfuPackage = new SecureDfuPackage(file);
-      dfuPackage.load()
-        .then(() => {
-          setStatus(`已就绪固件包: <strong>${file.name}</strong>`);
-          selectBox.style.display = "block";
-        })
-        .catch(err => {
-          selectBox.style.display = "none";
-          statusBox.style.display = "none";
-          setStatus(`<span style="color:red">解析固件包失败: ${err.message || err}</span>`);
-        });
+    async function loadZip(file) {
+      try {
+        const zip = await JSZip.loadAsync(file);
+        const manifestStr = await zip.file("manifest.json")?.async("string");
+        if (!manifestStr) throw new Error("固件包缺少 manifest.json");
+        const manifest = JSON.parse(manifestStr);
+        const app = manifest.manifest?.application;
+        if (!app) throw new Error("manifest.json 中未找到 application 固件段");
+
+        const initBytes = await zip.file(app.dat_file)?.async("uint8array");
+        const fwBytes = await zip.file(app.bin_file)?.async("uint8array");
+        if (!initBytes || !fwBytes) throw new Error("固件包损坏：缺少 .dat 或 .bin 文件");
+
+        parsedPackage = {
+          name: file.name,
+          initBytes,
+          fwBytes
+        };
+        setStatus(`已就绪固件包: <strong>${file.name}</strong> (${fwBytes.length} 字节)`);
+        selectBox.style.display = "block";
+      } catch (err) {
+        selectBox.style.display = "none";
+        statusBox.style.display = "none";
+        parsedPackage = null;
+        setStatus(`<span style="color:red">解析固件包失败: ${err.message || err}</span>`);
+      }
     }
 
     async function startUpdate() {
-      if (!dfuPackage) return;
+      if (!parsedPackage) return;
       updateBtn.disabled = true;
-      setStatus("正在扫描蓝牙 DFU 设备...");
       setProgress(null);
 
-      const dfu = new SecureDfu(CRC32.buf);
-      dfu.addEventListener("log", event => log(event.message));
-      dfu.addEventListener("progress", event => setProgress(event));
+      const dfu = new NordicSecureDFU(log, setProgress);
 
       try {
-        const device = await dfu.requestDevice(true);
-        if (!device) {
-          setStatus("已切换至 Bootloader 模式，请再次点击开始升级选择设备");
+        await dfu.selectDevice();
+        const mode = await dfu.connectAndCheckMode();
+        if (!mode.isBootloader) {
+          setStatus("设备已收到指令并重启到 DfuTarg 模式，<strong>请再次点击升级按钮</strong>并选择出现的 <code>DfuTarg</code> 设备。");
           updateBtn.disabled = false;
           return;
         }
 
-        const baseImage = await dfuPackage.getBaseImage();
-        if (baseImage) {
-          setStatus(`正在烧录 ${baseImage.type}: ${baseImage.imageFile}...`);
-          await dfu.update(device, baseImage.initData, baseImage.imageData);
-        }
+        setStatus("正在传输 Init 描述包...");
+        await dfu.transferInit(parsedPackage.initBytes);
 
-        const appImage = await dfuPackage.getAppImage();
-        if (appImage) {
-          setStatus(`正在烧录 ${appImage.type}: ${appImage.imageFile}...`);
-          await dfu.update(device, appImage.initData, appImage.imageData);
-        }
+        setStatus("正在传输应用固件...");
+        await dfu.transferFirmware(parsedPackage.fwBytes);
 
-        setStatus("<strong style='color:green'>升级完成！设备已重启。</strong>");
+        setStatus("<strong style='color:green'>🎉 固件升级成功！设备正在重启生效。</strong>");
         setProgress(null);
         fileEl.value = "";
       } catch (err) {
-        log(`升级异常: ${err.message || err}`);
+        log(`升级失败: ${err.message || err}`);
         setStatus(`<span style="color:red">升级失败: ${err.message || err}</span>`);
         statusBox.style.display = "none";
       } finally {
@@ -203,7 +206,7 @@
       }
     }
 
-    fileEl.addEventListener("change", e => setPackage(e.target.files[0]));
+    fileEl.addEventListener("change", e => loadZip(e.target.files[0]));
     updateBtn.addEventListener("click", startUpdate);
 
     ["drag", "dragstart", "dragend", "dragover", "dragenter", "dragleave", "drop"].forEach(name => {
@@ -211,7 +214,7 @@
     });
     ["dragover", "dragenter"].forEach(name => dropEl.addEventListener(name, () => dropEl.classList.add("hover")));
     ["dragleave", "dragend", "drop"].forEach(name => dropEl.addEventListener(name, () => dropEl.classList.remove("hover")));
-    dropEl.addEventListener("drop", e => setPackage(e.dataTransfer.files[0]));
+    dropEl.addEventListener("drop", e => loadZip(e.dataTransfer.files[0]));
   </script>
 </body>
 </html>
