@@ -70,16 +70,15 @@ class NordicSecureDFU {
   async selectDevice() {
     this.log("正在请求选择蓝牙设备...");
     const device = await navigator.bluetooth.requestDevice({
-      filters: [
-        { namePrefix: "NRF_EPD" },
-        { namePrefix: "DfuTarg" },
-        { services: [DFU_SERVICE_UUID] },
-        { services: [0xfe59] }
-      ],
+      acceptAllDevices: true,
       optionalServices: [
         DFU_SERVICE_UUID,
         0xfe59,
-        "00010203-0405-0607-0809-0a0b0c0d1912" // EPD service
+        "8ec90001-f315-4f60-9fb8-838830daea50",
+        "8ec90002-f315-4f60-9fb8-838830daea50",
+        "8ec90003-f315-4f60-9fb8-838830daea50",
+        "62750001-d828-918d-fb46-b6c11c675aec",
+        "00010203-0405-0607-0809-0a0b0c0d1912"
       ]
     });
     this.device = device;
