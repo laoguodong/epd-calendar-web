@@ -81,6 +81,11 @@
 
     <fieldset>
       <legend>固件文件</legend>
+      
+      <div style="text-align: center; margin: 10px 0;">
+        <button id="quick-load-btn" type="button" class="secondary" style="padding: 8px 16px; font-size: 14px;">⚡ 直接载入云端精简版固件 (29.4KB)</button>
+      </div>
+
       <div id="drop" class="dfu-card">
         <input id="file" class="file-input" type="file" accept=".zip" />
         <label id="label" class="file-label" for="file">
@@ -205,6 +210,20 @@
         updateBtn.disabled = false;
       }
     }
+
+    
+    document.getElementById("quick-load-btn").addEventListener("click", async () => {
+      try {
+        setStatus("正在下载精简版固件包...");
+        const resp = await fetch("EPD-nRF52-charger-lite-ota.zip");
+        if (!resp.ok) throw new Error("获取固件失败: " + resp.status);
+        const blob = await resp.blob();
+        blob.name = "EPD-nRF52-charger-lite-ota.zip";
+        await loadZip(blob);
+      } catch (err) {
+        setStatus("<span style='color:red'>载入失败: " + err.message + "</span>");
+      }
+    });
 
     fileEl.addEventListener("change", e => loadZip(e.target.files[0]));
     updateBtn.addEventListener("click", startUpdate);
