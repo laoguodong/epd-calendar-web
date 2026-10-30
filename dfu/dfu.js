@@ -139,6 +139,7 @@ class NordicSecureDFU {
 
       this.responseResolvers.push(data => {
         clearTimeout(timeout);
+        this.log(`← 响应: [${Array.from(data).map(b => '0x' + b.toString(16)).join(', ')}]`);
         if (data.length < 3 || data[0] !== OP_RESPONSE) {
           return reject(new Error("收到未知格式的响应: " + Array.from(data).map(b => b.toString(16)).join(" ")));
         }
@@ -150,12 +151,13 @@ class NordicSecureDFU {
             const ext = data[3];
             errText += `: ${EXTENDED_ERRORS[ext] || '0x' + ext.toString(16)}`;
           }
-          return reject(new Error(errText));
+          return reject(new Error(`指令 0x${opcode.toString(16)} 失败: ${errText}`));
         }
         resolve(data);
       });
 
       try {
+        this.log(`→ 发送指令: [${Array.from(bytes).map(b => '0x' + b.toString(16)).join(', ')}]`);
         await this.controlChar.writeValue(bytes);
       } catch (e) {
         clearTimeout(timeout);
@@ -214,13 +216,15 @@ class NordicSecureDFU {
   async transferInit(initBytes) {
     this.log(`准备写入 init packet (${initBytes.length} 字节)...`);
     const select = await this.selectObject(OBJECT_COMMAND);
-    this.log(`Init command 槽位信息: maxSize=${select.maxSize}, offset=${select.offset}`);
+    this.log(`Init command 槽位信息: maxSize=${select.maxSize}, offset=${select.offset}, crc=0x${select.crc.toString(16)}`);
 
-    if (select.offset < initBytes.length) {
+    const expectedCrc = this.calculateCrc(initBytes);
+    if (select.offset === initBytes.length && select.crc === expectedCrc) {
+      this.log("设备已存在匹配的 init packet，跳过写入直接执行...");
+    } else {
       await this.createObject(OBJECT_COMMAND, initBytes.length);
       await this.sendData(initBytes);
       const chk = await this.getChecksum();
-      const expectedCrc = this.calculateCrc(initBytes);
       if (chk.offset !== initBytes.length || chk.crc !== expectedCrc) {
         throw new Error(`Init packet CRC 校验不匹配: device=0x${chk.crc.toString(16)}, calc=0x${expectedCrc.toString(16)}`);
       }
