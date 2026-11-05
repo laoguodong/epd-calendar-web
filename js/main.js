@@ -90,11 +90,17 @@ async function write(cmd, data, withResponse = true) {
     addLog("服务不可用，请检查蓝牙连接");
     return false;
   }
-  let payload = [cmd];
-  if (data) {
-    if (typeof data == 'string') data = hex2bytes(data);
-    if (data instanceof Uint8Array) data = Array.from(data);
-    payload.push(...data)
+  let payload;
+  if (cmd instanceof Uint8Array) {
+    // callers may pass the complete frame (opcode + payload) as one buffer
+    payload = Array.from(cmd);
+  } else {
+    payload = [cmd];
+    if (data) {
+      if (typeof data == 'string') data = hex2bytes(data);
+      if (data instanceof Uint8Array) data = Array.from(data);
+      payload.push(...data)
+    }
   }
   addLog(bytes2hex(payload), '⇑');
   try {
