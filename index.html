@@ -1,17 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>墨水屏日历</title>
+	<title>停车牌配置 · 0x1B</title>
 	<link rel="shortcut icon" type="image/png" href="favicon.png">
 	<link rel="stylesheet" href="css/main.css?v=20251109">
 </head>
 
 <body>
 	<div class="main">
-		<h3>墨水屏日历</h3>
+		<h3>停车牌配置 · 0x1B</h3>
+<p>只允许一个蓝牙中心连接：先断开 nRF Connect，再连接网页。测试按钮会确认后主动断开。电量百分比是未校准估值；当前页面配套0x1B固件；定时功能需先同步时间，桩端鉴权请在现场安全状态下测试。</p>
 		<fieldset>
 			<legend>蓝牙连接</legend>
 			<div class="flex-container">
@@ -19,6 +20,7 @@
 					<button id="connectbutton" type="button" class="primary" onclick="preConnect()">连接</button>
 					<button id="reconnectbutton" type="button" class="secondary" onclick="reConnect()">重连</button>
 					<button type="button" class="secondary" onclick="clearLog()">清空日志</button>
+                    <button type="button" class="secondary" onclick="getDeviceStatus()">设备状态（不刷屏）</button>
 				</div>
 				<div class="flex-group right debug">
 					<label for="epddriver">驱动</label>
@@ -58,8 +60,8 @@
 					<input type="text" id="parking_phone" value="138-0000-0000" style="width: 140px; font-weight: bold; font-size: 15px;">
 				</div>
 				<div class="flex-group">
-					<label for="parking_refresh">温湿度/电压刷新间隔 (分钟):</label>
-					<input type="number" id="parking_refresh" value="10" min="1" max="1440" style="width: 80px;" title="每隔多少分钟局部刷新一次温度、日期和电池电压">
+					<label for="parking_refresh">温度/电压刷新间隔 (分钟):</label>
+					<input type="number" id="parking_refresh" value="10" min="1" max="120" style="width: 80px;" title="每隔多少分钟全刷一次，支持1–120分钟">
 				</div>
 				<div class="flex-group right">
 					<button type="button" class="primary" onclick="saveParkingConfig()">应用挪车牌模式</button>
@@ -68,14 +70,14 @@
 			</div>
 		</fieldset>
 		<fieldset>
-			<legend>⚡ 充电桩信标控制器 (Poer 一键开充)</legend>
+			<legend>⚡ 充电桩鉴权</legend>
 			<div class="flex-container">
 				<div class="flex-group">
 					<label for="beacon_mode">工作模式:</label>
 					<select id="beacon_mode">
-						<option value="2" selected>每日定时模式 (推荐波谷充电)</option>
-						<option value="1">周期脉冲模式 (超低功耗常驻)</option>
-						<option value="0">完全关闭广播</option>
+						<option value="2" selected>每日定时模式（需先同步时间）</option>
+						<option value="1">周期脉冲模式（功耗需实测）</option>
+						<option value="0">关闭充电鉴权（保留配置蓝牙）</option>
 					</select>
 				</div>
 				<div class="flex-group">
@@ -84,7 +86,7 @@
 				</div>
 				<div class="flex-group">
 					<label for="beacon_interval">周期/间隔 (秒):</label>
-					<input type="number" id="beacon_interval" value="3600" min="1" max="86400" style="width: 90px;" title="周期模式下每隔多少秒发射一次，如 600 为10分钟，3600 为1小时">
+					<input type="number" id="beacon_interval" value="3600" min="1" max="3600" style="width: 90px;" title="周期模式下每隔多少秒发射一次，如 600 为10分钟，3600 为1小时">
 				</div>
 			</div>
 			<div class="flex-container" style="margin-top: 10px;">
@@ -99,7 +101,7 @@
 				<div class="flex-group right">
 					<button type="button" class="primary" onclick="saveBeaconConfig()">保存信标配置</button>
 					<button type="button" class="secondary" onclick="getBeaconConfig()">读取配置</button>
-					<button type="button" class="secondary" onclick="triggerBeaconNow()">立即发射测试</button>
+					<button type="button" class="secondary" onclick="triggerBeaconNow()">测试广播（确认后断开）</button>
 				</div>
 			</div>
 		</fieldset>
@@ -296,7 +298,7 @@
 	<script type="text/javascript" src="js/rle.js"></script>
 	<script type="text/javascript" src="js/paint.js"></script>
 	<script type="text/javascript" src="js/crop.js"></script>
-	<script type="text/javascript" src="js/main.js"></script>
+	<script type="text/javascript" src="js/main.js?v=parking-1b-6700ae86"></script>
 	<script>
 		var _hmt = _hmt || [];
 		(function () {

@@ -4,6 +4,7 @@ let startTime, msgIndex, appVersion;
 let canvas, ctx, textDecoder;
 let paintManager, cropManager;
 let rleSupport;
+let notifyBuffer = "", notifyWaiters = [], writeQueue = Promise.resolve(), uiBusy = false;
 
 const EpdCmd = {
   SET_PINS: 0x00,
@@ -24,6 +25,7 @@ const EpdCmd = {
   EPD_CMD_TRIGGER_BEACON: 0x97,
   EPD_CMD_SET_PARKING_PHONE: 0x98,
   EPD_CMD_GET_PARKING_PHONE: 0x9A,
+  EPD_CMD_GET_STATUS: 0x9B,
   SYS_RESET: 0x91,
   SYS_SLEEP: 0x92,
   CFG_ERASE: 0x99,
@@ -82,38 +84,71 @@ function resetVariables() {
   epdCharacteristic = null;
   msgIndex = 0;
   rleSupport = false;
-  document.getElementById("log").value = '';
+  document.getElementById("log").innerHTML = '';
+  notifyBuffer = '';
+  for (const waiter of notifyWaiters.splice(0)) { clearTimeout(waiter.timer); waiter.reject(new Error('连接已断开')); }
 }
 
 async function write(cmd, data, withResponse = true) {
-  if (!epdCharacteristic) {
-    addLog("服务不可用，请检查蓝牙连接");
-    return false;
-  }
   let payload;
-  if (cmd instanceof Uint8Array) {
-    // callers may pass the complete frame (opcode + payload) as one buffer
-    payload = Array.from(cmd);
-  } else {
-    payload = [cmd];
-    if (data) {
-      if (typeof data == 'string') data = hex2bytes(data);
-      if (data instanceof Uint8Array) data = Array.from(data);
-      payload.push(...data)
+  if (cmd instanceof Uint8Array) payload = cmd;
+  else {
+    if (typeof data === 'string') data = hex2bytes(data);
+    payload = Uint8Array.from([cmd, ...(data || [])]);
+  }
+  const operation = writeQueue.catch(() => {}).then(async () => {
+    if (!epdCharacteristic || !gattServer?.connected) { addLog('服务不可用，请先连接'); return false; }
+    addLog(bytes2hex(payload), '⇑');
+    try {
+      if (withResponse) await epdCharacteristic.writeValueWithResponse(payload);
+      else await epdCharacteristic.writeValueWithoutResponse(payload);
+      return true;
+    } catch (e) { addLog('写入失败: ' + e.message); return false; }
+  });
+  writeQueue = operation;
+  return operation;
+}
+function waitLine(match, timeout = 90000) {
+  let waiter;
+  const promise = new Promise((resolve, reject) => {
+    waiter = {match, resolve, reject};
+    waiter.timer = setTimeout(() => {
+      notifyWaiters = notifyWaiters.filter(w => w !== waiter);
+      reject(new Error('设备未确认，不能当作保存成功'));
+    }, timeout);
+    notifyWaiters.push(waiter);
+  });
+  return {promise, cancel: () => { clearTimeout(waiter.timer); notifyWaiters = notifyWaiters.filter(w => w !== waiter); }};
+}
+async function requestFrame(frame, match) {
+  const pending = waitLine(match);
+  if (!await write(frame)) { pending.cancel(); throw new Error('蓝牙写入失败，未执行'); }
+  return pending.promise;
+}
+function acceptLine(msg) {
+  for (const waiter of [...notifyWaiters]) {
+    if (msg.startsWith('ERR:') || waiter.match(msg)) {
+      clearTimeout(waiter.timer);
+      notifyWaiters = notifyWaiters.filter(w => w !== waiter);
+      if (msg.startsWith('ERR:')) waiter.reject(new Error(msg));
+      else waiter.resolve(msg);
     }
   }
-  addLog(bytes2hex(payload), '⇑');
-  try {
-    if (withResponse)
-      await epdCharacteristic.writeValueWithResponse(Uint8Array.from(payload));
-    else
-      await epdCharacteristic.writeValueWithoutResponse(Uint8Array.from(payload));
-  } catch (e) {
-    console.error(e);
-    if (e.message) addLog("write: " + e.message);
-    return false;
-  }
-  return true;
+  handleTextNotify(msg);
+}
+async function uiOperation(fn) {
+  if (uiBusy) { addLog('上一项操作尚未完成，请稍等'); return false; }
+  uiBusy = true;
+  try { await fn(); return true; }
+  catch (e) { addLog('操作未完成: ' + e.message); return false; }
+  finally { uiBusy = false; }
+}
+function inputInt(id, min, max) {
+  const raw = document.getElementById(id).value.trim();
+  const value = Number(raw);
+  if (raw === '' || !Number.isInteger(value) || value < min || value > max)
+    throw new Error(`${id} 必须是 ${min}–${max} 的整数`);
+  return value;
 }
 
 async function writeImage(data, step = 'bw') {
@@ -171,17 +206,17 @@ async function syncTime(mode) {
   if (mode === 2) {
     if (!confirm('提醒：时钟模式目前使用全刷实现，此功能目前多用于修复老化屏残影问题，不建议长期开启，是否继续？')) return;
   }
-  const timestamp = new Date().getTime() / 1000;
+  const timestamp = Math.floor(Date.now() / 1000);
   const data = new Uint8Array([
     (timestamp >> 24) & 0xFF,
     (timestamp >> 16) & 0xFF,
     (timestamp >> 8) & 0xFF,
     timestamp & 0xFF,
-    -(new Date().getTimezoneOffset() / 60),
+    8, // form schedule is explicitly Beijing time
     mode
   ]);
   if (await write(EpdCmd.SET_TIME, data)) {
-    addLog("时间已同步！");
+    addLog("校时指令已发送（北京时间）；以设备回包为准。");
     addLog("屏幕刷新完成前请不要操作。");
   }
 }
@@ -340,20 +375,18 @@ function downloadDataArray() {
 }
 
 function updateButtonStatus(forceDisabled = false) {
-  const connected = gattServer != null && gattServer.connected;
-  const status = forceDisabled ? 'disabled' : (connected ? null : 'disabled');
-  document.getElementById("reconnectbutton").disabled = (gattServer == null || gattServer.connected) ? 'disabled' : null;
-  document.getElementById("sendcmdbutton").disabled = status;
-  document.getElementById("calendarmodebutton").disabled = status;
-  document.getElementById("clockmodebutton").disabled = status;
-  document.getElementById("clearscreenbutton").disabled = status;
-  document.getElementById("sendimgbutton").disabled = status;
-  document.getElementById("setDriverbutton").disabled = status;
+  const connected = !!gattServer?.connected;
+  for (const id of ['sendcmdbutton','synctimebutton','clearscreenbutton','sendimgbutton','setDriverbutton']) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = forceDisabled || !connected;
+  }
+  const reconnect = document.getElementById('reconnectbutton');
+  if (reconnect) reconnect.disabled = !bleDevice || connected;
 }
 
 function disconnect() {
-  updateButtonStatus();
   resetVariables();
+  updateButtonStatus();
   addLog('已断开连接.');
   document.getElementById("connectbutton").innerHTML = '连接';
 }
@@ -394,19 +427,26 @@ async function reConnect() {
   setTimeout(async function () { await connect(); }, 300);
 }
 
-function handleNotify(value, idx) {
+function handleNotify(value) {
   const data = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  if (idx == 0) {
-    addLog(`收到配置：${bytes2hex(data)}`);
-    const epdpins = document.getElementById("epdpins");
-    const epddriver = document.getElementById("epddriver");
-    epdpins.value = bytes2hex(data.slice(0, 7));
-    if (data.length > 10) epdpins.value += bytes2hex(data.slice(10, 11));
-    epddriver.value = bytes2hex(data.slice(7, 8));
+  if (data.length >= 11 && data[0] < 32 && data[1] < 32 && data[7] >= 1 && data[7] <= 5) {
+    document.getElementById('epdpins').value = bytes2hex(data.slice(0,7)) + bytes2hex(data.slice(10,11));
+    document.getElementById('epddriver').value = bytes2hex(data.slice(7,8));
     updateDitcherOptions();
-  } else {
-    if (textDecoder == null) textDecoder = new TextDecoder();
-    const msg = textDecoder.decode(data);
+    return;
+  }
+  if (textDecoder == null) textDecoder = new TextDecoder();
+  if (appVersion < 0x1b) { acceptLine(textDecoder.decode(data)); return; }
+  notifyBuffer += textDecoder.decode(data, {stream: true});
+  if (notifyBuffer.length > 512) { notifyBuffer = ''; addLog('通知帧溢出，已丢弃'); return; }
+  let newline;
+  while ((newline = notifyBuffer.indexOf('\n')) >= 0) {
+    const line = notifyBuffer.slice(0,newline).replace(/\r$/, '');
+    notifyBuffer = notifyBuffer.slice(newline+1);
+    if (line) acceptLine(line);
+  }
+}
+function handleTextNotify(msg) {
     addLog(msg, '⇓');
     if (msg.startsWith('PARKING:')) {
       const parts = msg.substring(8).split(',');
@@ -441,7 +481,6 @@ function handleNotify(value, idx) {
       addLog(`远端时间: ${new Date(t * 1000).toLocaleString()}`);
       addLog(`本地时间: ${new Date().toLocaleString()}`);
     }
-  }
 }
 
 async function connect() {
@@ -482,16 +521,19 @@ async function connect() {
   }
 
   try {
+    epdCharacteristic.addEventListener('characteristicvaluechanged', (event) => { handleNotify(event.target.value); });
     await epdCharacteristic.startNotifications();
-    epdCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
-      handleNotify(event.target.value, msgIndex++);
-    });
   } catch (e) {
     console.error(e);
     if (e.message) addLog("startNotifications: " + e.message);
   }
 
-  await write(EpdCmd.INIT);
+  // Connecting to settings must not initialize/reset the e-paper driver.
+  if (appVersion >= 0x1b) {
+    await getParkingConfig();
+    await getBeaconConfig();
+    await getDeviceStatus();
+  }
 
   document.getElementById("connectbutton").innerHTML = '断开';
   updateButtonStatus();
@@ -690,61 +732,58 @@ function checkDebugMode() {
 }
 
 async function saveParkingConfig() {
-  const phone = document.getElementById('parking_phone').value.trim() || "138-0000-0000";
-  const refMin = parseInt(document.getElementById('parking_refresh').value) || 10;
-  const enc = new TextEncoder();
-  const phoneBytes = enc.encode(phone);
-  const buf = new Uint8Array(3 + phoneBytes.length);
-  buf[0] = EpdCmd.EPD_CMD_SET_PARKING_PHONE;
-  buf[1] = (refMin >> 8) & 0xFF;
-  buf[2] = refMin & 0xFF;
-  buf.set(phoneBytes, 3);
-  await write(buf);
-  addLog(`已保存并切换到挪车牌模式: 电话=${phone}, 刷新间隔=${refMin}分钟`);
+  return uiOperation(async () => {
+    const phone = document.getElementById('parking_phone').value.replace(/[ -]/g, '');
+    if (!/^\d{11}$/.test(phone)) throw new Error('电话号码须为11位数字，可带空格或连字符');
+    const ref = inputInt('parking_refresh',1,120);
+    const frame = new Uint8Array([EpdCmd.EPD_CMD_SET_PARKING_PHONE,ref>>8,ref&255,...new TextEncoder().encode(phone)]);
+    if (appVersion < 0x1b) throw new Error('请配合审计版固件使用；旧版不能可靠确认落盘');
+    await requestFrame(frame, msg => msg === 'SAVE:OK');
+    const got = await requestFrame(new Uint8Array([EpdCmd.EPD_CMD_GET_PARKING_PHONE]),msg => msg.startsWith('PARKING:'));
+    if (got !== `PARKING:${ref},${phone}`) throw new Error('读回值不一致，保存未通过验收');
+    addLog('设备已确认落盘，读回停车牌配置一致');
+  });
 }
-
 async function getParkingConfig() {
-  await write(EpdCmd.EPD_CMD_GET_PARKING_PHONE);
-  addLog("正在读取挪车牌配置...");
+  try { await requestFrame(new Uint8Array([EpdCmd.EPD_CMD_GET_PARKING_PHONE]),m => m.startsWith('PARKING:')); }
+  catch (e) { addLog('读取停车牌配置失败: ' + e.message); }
 }
-
 async function getBeaconConfig() {
-  await write(EpdCmd.EPD_CMD_GET_BEACON_CONFIG);
-  addLog("正在查询充电信标配置...");
+  try { await requestFrame(new Uint8Array([EpdCmd.EPD_CMD_GET_BEACON_CONFIG]),m => m.startsWith('BEACON_CFG:')); }
+  catch (e) { addLog('读取信标配置失败: ' + e.message); }
 }
-
+async function getDeviceStatus() {
+  if (appVersion < 0x1b) { addLog('旧版不支持无SWD状态查询'); return; }
+  try { await requestFrame(new Uint8Array([EpdCmd.EPD_CMD_GET_STATUS]),m => m.startsWith('STATUS:')); }
+  catch (e) { addLog('读取设备状态失败: ' + e.message); }
+}
 async function saveBeaconConfig() {
-  const mode = parseInt(document.getElementById('beacon_mode').value) || 0;
-  const pwr = parseInt(document.getElementById('beacon_pwr').value) || 0;
-  const interval = parseInt(document.getElementById('beacon_interval').value) || 3600;
-  const timeStr = document.getElementById('beacon_time').value || "22:00";
-  const [h, m] = timeStr.split(':').map(x => parseInt(x) || 0);
-  const dur = parseInt(document.getElementById('beacon_duration').value) || 300;
-
-  const buf = new Uint8Array([
-    EpdCmd.EPD_CMD_SET_BEACON_CONFIG,
-    mode & 0xFF,
-    pwr & 0xFF,
-    (interval >> 8) & 0xFF,
-    interval & 0xFF,
-    h & 0xFF,
-    m & 0xFF,
-    (dur >> 8) & 0xFF,
-    dur & 0xFF
-  ]);
-  await write(buf);
-  addLog(`已发送保存信标设置: 模式=${mode}, 功率=${pwr}dBm, 间隔=${interval}s, 定时=${h}:${m}, 时长=${dur}s`);
+  return uiOperation(async () => {
+    const mode=inputInt('beacon_mode',0,2), pwr=inputInt('beacon_pwr',-20,4);
+    if (![-20,-16,-12,-8,-4,0,4].includes(pwr)) throw new Error('功率档位不受支持');
+    const interval=inputInt('beacon_interval',1,3600),dur=inputInt('beacon_duration',1,3600);
+    const t=/^(\d{2}):(\d{2})$/.exec(document.getElementById('beacon_time').value.trim());
+    if (!t || Number(t[1])>23 || Number(t[2])>59) throw new Error('时间须为有效 HH:MM');
+    const h=Number(t[1]),m=Number(t[2]);
+    if (appVersion < 0x1b) throw new Error('请配合审计版固件使用');
+    const frame=new Uint8Array([EpdCmd.EPD_CMD_SET_BEACON_CONFIG,mode,pwr&255,interval>>8,interval&255,h,m,dur>>8,dur&255]);
+    await requestFrame(frame,msg => msg === 'SAVE:OK');
+    const got=await requestFrame(new Uint8Array([EpdCmd.EPD_CMD_GET_BEACON_CONFIG]),msg => msg.startsWith('BEACON_CFG:'));
+    const expected=`BEACON_CFG:m=${mode},p=${pwr},iv=${interval},sch=${t[1]}:${t[2]},dur=${dur}`;
+    if (got !== expected) throw new Error('读回值不一致，保存未通过验收');
+    addLog('设备已确认落盘，读回信标配置一致');
+    if (mode===1 && dur>=interval) addLog('时长不小于周期，广播窗口会重叠并连续发射；需要停歇请缩短时长');
+  });
 }
-
 async function triggerBeaconNow() {
-  const dur = parseInt(document.getElementById('beacon_duration').value) || 300;
-  const buf = new Uint8Array([
-    EpdCmd.EPD_CMD_TRIGGER_BEACON,
-    (dur >> 8) & 0xFF,
-    dur & 0xFF
-  ]);
-  await write(buf);
-  addLog(`已触发立即发射 iBeacon 广播持续 ${dur} 秒`);
+  return uiOperation(async () => {
+    const dur=inputInt('beacon_duration',1,3600);
+    if (appVersion < 0x1b) throw new Error('请配合审计版固件使用');
+    if (!confirm(`将断开手机连接，随后测试广播 ${dur} 秒。它可能触发已授权充电桩，请确认现场安全。继续？`)) return;
+    await requestFrame(new Uint8Array([EpdCmd.EPD_CMD_TRIGGER_BEACON,dur>>8,dur&255]),m => m==='BEACON_TRIG:WAIT_DISCONNECT');
+    addLog(`请求已确认；断开后开始计时，配置连接与广播不同时占用`);
+    bleDevice.gatt.disconnect();
+  });
 }
 
 document.body.onload = () => {
